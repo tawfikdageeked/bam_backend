@@ -1,0 +1,7 @@
+build/
+bin/
+*.o
+*.a
+task_api
+.cache/
+compile_commands.json
