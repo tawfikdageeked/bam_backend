@@ -173,23 +173,73 @@ void TaskAPI::UpdateTaskStatus(const drogon::HttpRequestPtr& req, std::function<
     try {
         int64_t t_id = std::stoll(task_id);
 
-
+        // 1. Fetch the task to see who owns it and who is assigned to it
         db->execSqlAsync(
-        "UPDATE tasks SET status = $1 WHERE id = $2 AND company_id = $3 AND assigned_to = $4 RETURNING id",
-        [callback](const drogon::orm::Result &result) {
+        "SELECT assigned_by, assigned_to FROM tasks WHERE id = $1 AND company_id = $2",
+        [callback, caller, t_id, new_status, db](const drogon::orm::Result &result) {
             if (result.empty()) {
                 auto res = drogon::HttpResponse::newHttpResponse();
-                res->setStatusCode(drogon::k403Forbidden);
-                res->setBody("{\"error\":\"Task not found or you are not the assignee\"}");
+                res->setStatusCode(drogon::k404NotFound);
+                res->setBody("{\"error\":\"Task not found or not in your company\"}");
                 callback(res);
                 return;
             }
-            Json::Value ret;
-            ret["status"] = "success";
-            callback(drogon::HttpResponse::newHttpJsonResponse(ret));
+
+            int64_t assigned_by = result[0]["assigned_by"].as<int64_t>();
+            int64_t assigned_to = result[0]["assigned_to"].as<int64_t>();
+
+            bool is_manager = (caller.user_id == assigned_by);
+            bool is_employee = (caller.user_id == assigned_to);
+
+            // 2. Enforce the Maker/Checker rules
+            bool status_allowed = false;
+
+            if (is_employee && (new_status == "in_progress" || new_status == "submitted")) {
+                status_allowed = true;
+            }
+            
+            if (is_manager && (new_status == "completed" || new_status == "rejected")) {
+                status_allowed = true;
+            }
+
+            if (!is_manager && !is_employee) {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k403Forbidden);
+                res->setBody("{\"error\":\"You are not related to this task\"}");
+                callback(res);
+                return;
+            }
+
+            if (!status_allowed) {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k403Forbidden);
+                res->setBody("{\"error\":\"Status update not permitted for your role on this task\"}");
+                callback(res);
+                return;
+            }
+
+            // 3. Rules passed, update the database
+            db->execSqlAsync(
+            "UPDATE tasks SET status = $1 WHERE id = $2",
+            [callback](const drogon::orm::Result &update_res) {
+                Json::Value ret;
+                ret["status"] = "success";
+                callback(drogon::HttpResponse::newHttpJsonResponse(ret));
+            },
+            [callback](const drogon::orm::DrogonDbException &e) {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k500InternalServerError);
+                callback(res);
+            },
+            new_status, t_id
+            );
         },
-        [](const drogon::orm::DrogonDbException &e) {},
-        new_status, t_id, caller.company_id, caller.user_id
+        [callback](const drogon::orm::DrogonDbException &e) {
+            auto res = drogon::HttpResponse::newHttpResponse();
+            res->setStatusCode(drogon::k500InternalServerError);
+            callback(res);
+        },
+        t_id, caller.company_id
         );
     } catch (...) {
         auto res = drogon::HttpResponse::newHttpResponse();
@@ -197,6 +247,7 @@ void TaskAPI::UpdateTaskStatus(const drogon::HttpRequestPtr& req, std::function<
         callback(res);
     }
 }
+
 
 void TaskAPI::DeleteTask(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, std::string task_id)
 {

@@ -1,38 +1,31 @@
-# BAM Task Management API – Frontend Integration Guide
-
-This document outlines the REST API architecture, authentication requirements, and available endpoints for the BAM backend.
-
-## 1. Global Specifications
-
-* **Base URL (Development):** `[http://127.0.0.1:8080/bam](http://127.0.0.1:8080/bam)`
-* **Content-Type:** All POST and PATCH requests must send a JSON payload and include the `Content-Type: application/json` header.
-* **Authentication:** This API uses JWT (JSON Web Tokens). After logging in, the token must be passed in the headers of **every** protected request using the exact key `token`.
-* *Note: Do not use `Authorization: Bearer <token>`, simply use `token: <jwt_string>`.*
-
-
-* **Tenant Isolation:** Data is automatically scoped by `company_id` inside the token. The frontend never needs to pass a company ID; the backend handles this natively.
-
-## 2. Roles & Permissions (The Tier System)
-
-Users have a numerical `tier` assigned to them, establishing a rigid hierarchy:
-
-* **Tier 0 (Admin):** Can assign tasks to anyone.
-* **Tier 2 (Employee):** Cannot assign tasks to Tier 0 Admins (returns `403 Forbidden`).
-* **General Rule:** A user can only assign tasks to someone with an equal or numerically higher tier.
+Here is the complete, highly detailed API documentation designed specifically for a frontend developer. It includes exact HTTP request structures, headers, payloads, and all business-logic rules they need to handle on the client side.
 
 ---
 
-## 3. Endpoints
+# BAM REST API – Frontend Integration Documentation
 
-### Authentication
+## 1. Global API Rules
 
-#### `POST /login`
+* **Base URL:** `[http://127.0.0.1:8080/bam](http://127.0.0.1:8080/bam)` (Update to production domain when live)
+* **Content-Type:** All requests with a body (POST, PATCH) must send `Content-Type: application/json`.
+* **Authentication:** The API uses JSON Web Tokens (JWT). The token must be passed in the headers of **every** protected request using the exact key `token`.
+* **Tenant Isolation:** The frontend never needs to send the user's `company_id`. The backend extracts this securely from the JWT and automatically filters all database queries.
 
-Authenticates a user and returns a JWT token valid for 15 minutes.
+---
 
-**Request Body:**
+## 2. Authentication
 
-```json
+### `POST /login`
+
+Authenticates a user and generates a JWT.
+
+**HTTP Request:**
+
+```http
+POST /bam/login HTTP/1.1
+Host: 127.0.0.1:8080
+Content-Type: application/json
+
 {
     "username": "admin",
     "password": "password123"
@@ -40,8 +33,9 @@ Authenticates a user and returns a JWT token valid for 15 minutes.
 
 ```
 
-**Success Response (200 OK):**
+**Responses:**
 
+* **200 OK** (Success)
 ```json
 {
     "token": "eyJhbGciOiJIUzI1NiIsIn..."
@@ -49,29 +43,35 @@ Authenticates a user and returns a JWT token valid for 15 minutes.
 
 ```
 
-**Error Responses:**
 
-* `400 Bad Request`: Missing JSON payload.
-* `401 Unauthorized`: Invalid credentials.
+*Frontend Action: Save this token in memory or secure storage. Attach it to all subsequent requests.*
+* **400 Bad Request**: `{"error": "No JSON in request body"}`
+* **401 Unauthorized**: Invalid username or password.
 
 ---
 
-### Tasks (Protected Routes)
+## 3. Task Management
 
-*All routes below require the `token: <your_jwt>` header.*
+### `GET /tasks`
 
-#### `GET /tasks`
+Retrieves a list of all tasks within the authenticated user's company, ordered newest to oldest.
 
-Retrieves a list of all tasks within the authenticated user's company, ordered from newest to oldest.
+**HTTP Request:**
 
-**Optional Query Parameters:**
+```http
+GET /bam/tasks HTTP/1.1
+Host: 127.0.0.1:8080
+token: <your_jwt_string>
 
-| Parameter | Type | Description |
-| --- | --- | --- |
-| `assigned_to` | integer | Filters the list to only show tasks assigned to a specific user ID (e.g., `/tasks?assigned_to=2`). |
+```
 
-**Success Response (200 OK):**
+**Optional Query Parameter:**
+To view tasks assigned to a specific user, append `?assigned_to=<user_id>`.
+*Example: `GET /bam/tasks?assigned_to=5*`
 
+**Responses:**
+
+* **200 OK** (Success)
 ```json
 {
     "status": "success",
@@ -79,9 +79,9 @@ Retrieves a list of all tasks within the authenticated user's company, ordered f
         {
             "id": 1,
             "assigned_by": 2,
-            "assigned_to": 2,
-            "title": "Configure the task API",
-            "description": "The backend handles routing and security natively.",
+            "assigned_to": 5,
+            "title": "Update dashboard UI",
+            "description": "Implement the new Figma designs.",
             "status": "pending"
         }
     ]
@@ -89,41 +89,57 @@ Retrieves a list of all tasks within the authenticated user's company, ordered f
 
 ```
 
-#### `GET /tasks/{id}`
 
-Retrieves details for a single, specific task.
 
-**Success Response (200 OK):**
+---
 
+### `GET /tasks/{id}`
+
+Retrieves details for a single task.
+
+**HTTP Request:**
+
+```http
+GET /bam/tasks/1 HTTP/1.1
+Host: 127.0.0.1:8080
+token: <your_jwt_string>
+
+```
+
+**Responses:**
+
+* **200 OK** (Success)
 ```json
 {
     "status": "success",
     "task": {
         "id": 1,
-        "title": "Configure the task API",
+        "title": "Update dashboard UI",
         "status": "pending"
     }
 }
 
 ```
 
-**Error Responses:**
 
-* `404 Not Found`: Task does not exist or belongs to a different company.
+* **404 Not Found**: Task does not exist or belongs to another company.
 
-#### `POST /tasks`
+---
 
-Creates a new task and assigns it to a user in the same company.
+### `POST /tasks`
 
-**Request Body:**
+Creates a new task.
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `title` | string | Yes | The title of the task. |
-| `assigned_to` | integer | Yes | The user ID of the person responsible. |
-| `description` | string | No | Detailed task description. Defaults to empty string. |
+**Business Rule (Tier Hierarchy):** The logged-in user can only assign tasks to users with an equal or lower rank (a higher tier number). Assigning a task to a superior will be rejected by the backend.
 
-```json
+**HTTP Request:**
+
+```http
+POST /bam/tasks HTTP/1.1
+Host: 127.0.0.1:8080
+token: <your_jwt_string>
+Content-Type: application/json
+
 {
     "title": "Update dashboard UI",
     "description": "Implement the new Figma designs.",
@@ -132,8 +148,11 @@ Creates a new task and assigns it to a user in the same company.
 
 ```
 
-**Success Response (200 OK):**
+*(Note: `description` is optional, but `title` and `assigned_to` are required).*
 
+**Responses:**
+
+* **200 OK** (Success)
 ```json
 {
     "status": "success",
@@ -142,27 +161,45 @@ Creates a new task and assigns it to a user in the same company.
 
 ```
 
-**Error Responses:**
 
-* `400 Bad Request`: Missing required fields.
-* `403 Forbidden`: Attempting to assign a task to a higher-tier user.
-* `404 Not Found`: Target user does not exist or is in a different company.
+* **400 Bad Request**: `{"error": "title and assigned_to are required"}`
+* **403 Forbidden**: `{"error": "Cannot assign tasks to higher tier users"}`
+* **404 Not Found**: `{"error": "Target user not found in your company"}`
 
-#### `PATCH /tasks/{id}/status`
+---
 
-Updates the status of an existing task. **Security restriction:** Only the user currently assigned to the task (`assigned_to`) can update its status.
+### `PATCH /tasks/{id}/status`
 
-**Request Body:**
+Updates the status of an existing task.
 
-```json
+**Business Rule (Maker/Checker):** The backend strictly enforces what status strings can be sent based on the user's relationship to the task. The frontend should hide/disable UI buttons accordingly.
+
+* **The Employee (The person doing the work - `assigned_to`):**
+* Allowed to send: `"in_progress"`, `"submitted"`
+
+
+* **The Manager (The person who created the task - `assigned_by`):**
+* Allowed to send: `"completed"`, `"rejected"`
+
+
+
+**HTTP Request:**
+
+```http
+PATCH /bam/tasks/1/status HTTP/1.1
+Host: 127.0.0.1:8080
+token: <your_jwt_string>
+Content-Type: application/json
+
 {
-    "status": "completed"
+    "status": "submitted"
 }
 
 ```
 
-**Success Response (200 OK):**
+**Responses:**
 
+* **200 OK** (Success)
 ```json
 {
     "status": "success"
@@ -170,16 +207,34 @@ Updates the status of an existing task. **Security restriction:** Only the user 
 
 ```
 
-**Error Responses:**
 
-* `403 Forbidden`: User is not the assignee of the task.
+* **403 Forbidden**:
+* `{"error": "Status update not permitted for your role on this task"}` (e.g., an employee tried to mark it "completed").
+* `{"error": "You are not related to this task"}` (User is neither the assigner nor the assignee).
 
-#### `DELETE /tasks/{id}`
 
-Permanently deletes a task. **Security restriction:** Only the user who originally created the task (`assigned_by`) has permission to delete it.
+* **404 Not Found**: `{"error": "Task not found or not in your company"}`
 
-**Success Response (200 OK):**
+---
 
+### `DELETE /tasks/{id}`
+
+Permanently deletes a task.
+
+**Business Rule (Creator Only):** Only the specific manager who created the task (`assigned_by`) has the authority to delete it.
+
+**HTTP Request:**
+
+```http
+DELETE /bam/tasks/1 HTTP/1.1
+Host: 127.0.0.1:8080
+token: <your_jwt_string>
+
+```
+
+**Responses:**
+
+* **200 OK** (Success)
 ```json
 {
     "status": "success"
@@ -187,6 +242,5 @@ Permanently deletes a task. **Security restriction:** Only the user who original
 
 ```
 
-**Error Responses:**
 
-* `403 Forbidden`: User is not the creator of the task.
+* **403 Forbidden**: `{"error": "Task not found or you lack permission to delete it"}` (The user didn't create this task).
