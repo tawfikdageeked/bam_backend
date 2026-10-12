@@ -1,0 +1,192 @@
+# BAM Task Management API – Frontend Integration Guide
+
+This document outlines the REST API architecture, authentication requirements, and available endpoints for the BAM backend.
+
+## 1. Global Specifications
+
+* **Base URL (Development):** `[http://127.0.0.1:8080/bam](http://127.0.0.1:8080/bam)`
+* **Content-Type:** All POST and PATCH requests must send a JSON payload and include the `Content-Type: application/json` header.
+* **Authentication:** This API uses JWT (JSON Web Tokens). After logging in, the token must be passed in the headers of **every** protected request using the exact key `token`.
+* *Note: Do not use `Authorization: Bearer <token>`, simply use `token: <jwt_string>`.*
+
+
+* **Tenant Isolation:** Data is automatically scoped by `company_id` inside the token. The frontend never needs to pass a company ID; the backend handles this natively.
+
+## 2. Roles & Permissions (The Tier System)
+
+Users have a numerical `tier` assigned to them, establishing a rigid hierarchy:
+
+* **Tier 0 (Admin):** Can assign tasks to anyone.
+* **Tier 2 (Employee):** Cannot assign tasks to Tier 0 Admins (returns `403 Forbidden`).
+* **General Rule:** A user can only assign tasks to someone with an equal or numerically higher tier.
+
+---
+
+## 3. Endpoints
+
+### Authentication
+
+#### `POST /login`
+
+Authenticates a user and returns a JWT token valid for 15 minutes.
+
+**Request Body:**
+
+```json
+{
+    "username": "admin",
+    "password": "password123"
+}
+
+```
+
+**Success Response (200 OK):**
+
+```json
+{
+    "token": "eyJhbGciOiJIUzI1NiIsIn..."
+}
+
+```
+
+**Error Responses:**
+
+* `400 Bad Request`: Missing JSON payload.
+* `401 Unauthorized`: Invalid credentials.
+
+---
+
+### Tasks (Protected Routes)
+
+*All routes below require the `token: <your_jwt>` header.*
+
+#### `GET /tasks`
+
+Retrieves a list of all tasks within the authenticated user's company, ordered from newest to oldest.
+
+**Optional Query Parameters:**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `assigned_to` | integer | Filters the list to only show tasks assigned to a specific user ID (e.g., `/tasks?assigned_to=2`). |
+
+**Success Response (200 OK):**
+
+```json
+{
+    "status": "success",
+    "tasks": [
+        {
+            "id": 1,
+            "assigned_by": 2,
+            "assigned_to": 2,
+            "title": "Configure the task API",
+            "description": "The backend handles routing and security natively.",
+            "status": "pending"
+        }
+    ]
+}
+
+```
+
+#### `GET /tasks/{id}`
+
+Retrieves details for a single, specific task.
+
+**Success Response (200 OK):**
+
+```json
+{
+    "status": "success",
+    "task": {
+        "id": 1,
+        "title": "Configure the task API",
+        "status": "pending"
+    }
+}
+
+```
+
+**Error Responses:**
+
+* `404 Not Found`: Task does not exist or belongs to a different company.
+
+#### `POST /tasks`
+
+Creates a new task and assigns it to a user in the same company.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | string | Yes | The title of the task. |
+| `assigned_to` | integer | Yes | The user ID of the person responsible. |
+| `description` | string | No | Detailed task description. Defaults to empty string. |
+
+```json
+{
+    "title": "Update dashboard UI",
+    "description": "Implement the new Figma designs.",
+    "assigned_to": 5
+}
+
+```
+
+**Success Response (200 OK):**
+
+```json
+{
+    "status": "success",
+    "task_id": 2
+}
+
+```
+
+**Error Responses:**
+
+* `400 Bad Request`: Missing required fields.
+* `403 Forbidden`: Attempting to assign a task to a higher-tier user.
+* `404 Not Found`: Target user does not exist or is in a different company.
+
+#### `PATCH /tasks/{id}/status`
+
+Updates the status of an existing task. **Security restriction:** Only the user currently assigned to the task (`assigned_to`) can update its status.
+
+**Request Body:**
+
+```json
+{
+    "status": "completed"
+}
+
+```
+
+**Success Response (200 OK):**
+
+```json
+{
+    "status": "success"
+}
+
+```
+
+**Error Responses:**
+
+* `403 Forbidden`: User is not the assignee of the task.
+
+#### `DELETE /tasks/{id}`
+
+Permanently deletes a task. **Security restriction:** Only the user who originally created the task (`assigned_by`) has permission to delete it.
+
+**Success Response (200 OK):**
+
+```json
+{
+    "status": "success"
+}
+
+```
+
+**Error Responses:**
+
+* `403 Forbidden`: User is not the creator of the task.
