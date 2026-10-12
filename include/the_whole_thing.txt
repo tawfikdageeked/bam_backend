@@ -1,9 +1,12 @@
-==> ./authorization.hpp <==
+==> authorization.hpp <==
 #pragma once 
 #include <drogon/drogon.h>
 #include <string>
+#include <string_view>
 #include <cstdint>
 
+// site name
+constexpr std::string_view site_name = "/bam";
 
 
 
@@ -19,23 +22,31 @@ namespace Auth
         int tier = -1;
     };
 
+    class JwtFilter : public drogon::HttpFilter<JwtFilter>
+    {
+        public:
+            void doFilter(const drogon::HttpRequestPtr &req,
+            drogon::FilterCallback &&fcb,
+            drogon::FilterChainCallback &&fccb) override;
+    };
+
     // initialize the login handler
     void Init();
 
     // takes an http request checks if there is anyone logged in and return who the fuck is him
     User GetUser(const drogon::HttpRequestPtr& req);
 
-    //takes http request reques from the from the login handler and hanlde the fuck out of loggin in
-    void LoginHandler(const drogon::HttpRequestPtr& req, std::function<void (HttpResponse&)>&& callback);
+    //takes http request from the login handler and hanlde the fuck out of loggin in
+    void LoginHandler(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr&)>&& callback);
+   
 
 }
 
-==> ./crypto.hpp <==
+==> crypto.hpp <==
 #pragma once
 #include <sodium.h>
 #include <stdexcept>
 #include <string>
-#include <iostream>
 
 
 
@@ -50,5 +61,29 @@ namespace Crypto
 
 
     // takes a plain password from the http request and compares it to the hashed password and return a bool
-    bool VerifyPassword(const std::string& db_hash, const std::string incoming_password);
+    bool VerifyPassword(const std::string& db_hash, const std::string& incoming_password);
+}
+
+==> task.hpp <==
+#pragma once
+#include <drogon/drogon.h>
+
+namespace TaskAPI
+{
+    void Init();
+
+    // 1. Fetch all tasks (supports ?assigned_to=X filtering)
+    void GetTasks(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback);
+    
+    // 2. Fetch one specific task
+    void GetTaskById(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, std::string task_id);
+    
+    // 3. Create a task (enforces tier hierarchy)
+    void CreateTask(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback);
+    
+    // 4. Update task status (only the person assigned to it can do this)
+    void UpdateTaskStatus(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, std::string task_id);
+    
+    // 5. Delete a task (only the person who created it can do this)
+    void DeleteTask(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, std::string task_id);
 }

@@ -22,7 +22,6 @@ namespace Auth
 
     void LoginHandler(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr&)>&& callback)
     {
-        std::cout << "[HTTP] -> /bam/login received\n";
         auto json = req->getJsonObject();
         if(!json)
         {
@@ -36,22 +35,19 @@ namespace Auth
         std::string username = (*json)["username"].asString();
         std::string password = (*json)["password"].asString();
 
-        std::cout << "[HTTP] -> Querying DB for user: " << username << "\n";
-
         auto db = drogon::app().getDbClient();
 
         db->execSqlAsync(
             "SELECT id, company_id, tier, password_hash FROM users WHERE username = $1",
             [callback, password](const drogon::orm::Result &result)
             {
-                std::cout << "[DB] -> Query returned " << result.size() << " rows\n";
                 if(result.empty())
                 {
                     auto res = drogon::HttpResponse::newHttpResponse();
                     res->setStatusCode(drogon::k401Unauthorized);
                     callback(res);
                     return;
-                }
+                } 
 
                 int64_t db_user_id = result[0]["id"].as<int64_t>();
                 int64_t db_company_id = result[0]["company_id"].as<int64_t>();
@@ -89,5 +85,47 @@ namespace Auth
             },
             username
         );
+    } // <--- Notice how LoginHandler cleanly closes here!
+
+    void JwtFilter::doFilter(const drogon::HttpRequestPtr &req,
+                             drogon::FilterCallback &&fcb,
+                             drogon::FilterChainCallback &&fccb)
+    {
+        std::string token = req->getHeader("token");
+
+        if (token.empty())
+        {
+            auto res = drogon::HttpResponse::newHttpResponse();
+            res->setStatusCode(drogon::k401Unauthorized);
+            res->setBody("{\"error\":\"Missing token header\"}");
+            fcb(res);
+            return;
+        }
+
+        try
+        {
+            auto verifier = jwt::verify()
+            .allow_algorithm(jwt::algorithm::hs256{"CLASSIFIED"});
+
+            auto decoded = jwt::decode(token);
+            verifier.verify(decoded); 
+
+            int64_t user_id = std::stoll(decoded.get_payload_claim("user_id").as_string());
+            int64_t company_id = std::stoll(decoded.get_payload_claim("company_id").as_string());
+            int tier = std::stoi(decoded.get_payload_claim("tier").as_string());
+
+            req->attributes()->insert("user_id", user_id);
+            req->attributes()->insert("company_id", company_id);
+            req->attributes()->insert("tier", tier);
+
+            fccb();
+        }
+        catch (const std::exception &e)
+        {
+            auto res = drogon::HttpResponse::newHttpResponse();
+            res->setStatusCode(drogon::k401Unauthorized);
+            res->setBody("{\"error\":\"Invalid or expired token\"}");
+            fcb(res);
+        }
     }
 }

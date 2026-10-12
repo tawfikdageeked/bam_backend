@@ -22,6 +22,7 @@ add_executable(task_api
     src/main.cpp 
     src/authorization.cpp 
     src/crypto.cpp
+    src/task.cpp
 )
 
 # Tell the compiler where your header files are

@@ -1,62 +1,62 @@
-==> ./authoriztion.cpp <==
-#include "authorization.hpp"
-#include "db.hpp"
-#include <drogon/drogon.h>
-#include <drogon/orm/Exception.h>
-#include <jwt-cpp/jwt.h>
+==> authorization.cpp <==
 #include "authorization.hpp"
 #include "crypto.hpp"
+#include <jwt-cpp/jwt.h>
 #include <iostream>
 
 namespace Auth
 {
     void Init()
     {
-        app.registerHandler(site_name + "/login", &Auth::LoginHandler, {drogon::POST})
+        std::string login_route = std::string(site_name) + "/login";
+        drogon::app().registerHandler(login_route, &Auth::LoginHandler, {drogon::Post});
     }
 
     User GetUser(const drogon::HttpRequestPtr& req)
     {
-        return User
-        {
-            req->attribute()->get<int64_t>("user_id"),
-            req->attribute()->get<int64_t>("company_id"),
-            req->attribute()->get<int>("tier"),
-        };
+        return User(
+            req->attributes()->get<int64_t>("user_id"),
+            req->attributes()->get<int64_t>("company_id"),
+            req->attributes()->get<int>("tier")
+        );
     }
 
-    void LoginHandler(const drogon::HttpRequestPtr& req, std::function<void (HttpResponse&)>&& callback)
+    void LoginHandler(const drogon::HttpRequestPtr& req, std::function<void (const drogon::HttpResponsePtr&)>&& callback)
     {
+        //std::cout << "[HTTP] -> /bam/login received\n";
         auto json = req->getJsonObject();
         if(!json)
         {
-            aut res = drogon::HttpResponse::newHttpResponse();
+            std::cout << "[HTTP] -> No JSON in request body\n";
+            auto res = drogon::HttpResponse::newHttpResponse();
             res->setStatusCode(drogon::k400BadRequest);
             callback(res);
             return;
         }
 
-        std::string username = (json*)["username"].asString();
-        std::string password = (json*)["password"].asString();
+        std::string username = (*json)["username"].asString();
+        std::string password = (*json)["password"].asString();
+
+        //std::cout << "[HTTP] -> Querying DB for user: " << username << "\n";
 
         auto db = drogon::app().getDbClient();
 
-        db->execAsync
-        (
-            "Select id, company_id, tier, password_hash FROM users WHERE username = $1",
+        db->execSqlAsync(
+            "SELECT id, company_id, tier, password_hash FROM users WHERE username = $1",
             [callback, password](const drogon::orm::Result &result)
             {
+                //std::cout << "[DB] -> Query returned " << result.size() << " rows\n";
                 if(result.empty())
                 {
                     auto res = drogon::HttpResponse::newHttpResponse();
                     res->setStatusCode(drogon::k401Unauthorized);
                     callback(res);
                     return;
-                }
+                } 
 
                 int64_t db_user_id = result[0]["id"].as<int64_t>();
                 int64_t db_company_id = result[0]["company_id"].as<int64_t>();
-                int db_tier = result[0]["tier"].as<int64_t>();
+                int db_tier = result[0]["tier"].as<int>();
                 std::string db_hash = result[0]["password_hash"].as<std::string>();
 
                 if(!Crypto::VerifyPassword(db_hash, password))
@@ -67,13 +67,12 @@ namespace Auth
                     return;
                 }
 
-                // generate the JWT
-                std::string token = jwt::create();
+                std::string token = jwt::create()
                 .set_type("JWT")
-                .set_payload_claim("user_id", jwt::claim(db_user_id)),
-                .set_payload_claim("company_id", jwt::claim(db_company_id)),
-                .set_payload_claim("tier", jwt::claim(db_tier)),
-                .set_expires_at(std::chrono::sytem_clock::now() + std::chrono::seconds(900)),
+                .set_payload_claim("user_id", jwt::claim(std::to_string(db_user_id)))
+                .set_payload_claim("company_id", jwt::claim(std::to_string(db_company_id)))
+                .set_payload_claim("tier", jwt::claim(std::to_string(db_tier)))
+                .set_expires_at(std::chrono::system_clock::now() + std::chrono::seconds(900))
                 .sign(jwt::algorithm::hs256{"CLASSIFIED"});
 
                 Json::Value ret;
@@ -82,25 +81,69 @@ namespace Auth
                 res->setStatusCode(drogon::k200OK);
                 callback(res);
             },
-
             [callback](const drogon::orm::DrogonDbException &e)
             {
-                std::cerr << "Login DB Error: " e.base().what() << std::endl;
-                auto res = dorgon:HttpResponse::newHttpResponse();
-                res->setStatusCode(drogon::K500InternalServerError);
+                std::cerr << "Login DB Error: " << e.base().what() << std::endl;
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k500InternalServerError);
                 callback(res);
             },
-
-            username,
+            username
         );
+
+        Auth::User Auth::GetUser(const drogon::HttpRequestPtr& req)
+        {
+            int64_t user_id = req->attributes()->get<int64_t>("user_id");
+            int64_t company_id = req->attributes()->get<int64_t>("company_id");
+            int tier = req->attributes()->get<int>("tier");
+            return Auth::User(user_id, company_id, tier);
+        }
+
+        void JwtFilter::doFilter(const drogon::HttpRequestPtr &req,
+        drogon::FilterCallback &&fcb,
+        drogon::FilterChainCallback &&fccb)
+        {
+            std::string token = req->getHeader("token");
+
+            if (token.empty())
+            {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k401Unauthorized);
+                res->setBody("{\"error\":\"Missing token header\"}");
+                fcb(res);
+                return;
+            }
+
+            try
+            {
+                auto verifier = jwt::verify()
+                .allow_algorithm(jwt::algorithm::hs256{"CLASSIFIED"});
+
+                auto decoded = jwt::decode(token);
+                verifier.verify(decoded); 
+
+                int64_t user_id = std::stoll(decoded.get_payload_claim("user_id").as_string());
+                int64_t company_id = std::stoll(decoded.get_payload_claim("company_id").as_string());
+                int tier = std::stoi(decoded.get_payload_claim("tier").as_string());
+
+                req->attributes()->insert("user_id", user_id);
+                req->attributes()->insert("company_id", company_id);
+                req->attributes()->insert("tier", tier);
+
+                fccb();
+            }
+            catch (const std::exception &e)
+            {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k401Unauthorized);
+                res->setBody("{\"error\":\"Invalid or expired token\"}");
+                fcb(res);
+            }
+        }
     }
 }
 
-==> ./crypto.cpp <==
-#include <sodium.h>
-#include <stdexcept>
-#include <string>
-#include <iostream>
+==> crypto.cpp <==
 #include "crypto.hpp"
 
 namespace Crypto
@@ -109,7 +152,7 @@ namespace Crypto
     {
         if(sodium_init() < 0)
         {
-            throw std::runtime_error("Failed to in intitialize encrypter");
+            throw std::runtime_error("Failed to initialize encrypter");
         }
     }
 
@@ -117,16 +160,13 @@ namespace Crypto
     {
         char hashed_buffer[crypto_pwhash_STRBYTES];
 
-        if(
-        crypto_pwhash_str
-        (
-        hashed_buffer,
-        plain_password.c_str(),
-        plain_password.length(),
-        crypto_pwhash_OPSLIMIT_INTERACTVIE,
-        crypto_pwhash_MEMLIMIT_INTERACTIVE,
-        )
-        != 0)
+        if(crypto_pwhash_str(
+            hashed_buffer,
+            plain_password.c_str(),
+            plain_password.length(),
+            crypto_pwhash_OPSLIMIT_INTERACTIVE,
+            crypto_pwhash_MEMLIMIT_INTERACTIVE
+        ) != 0)
         {
             throw std::runtime_error("Out of memory during password hashing");
         }
@@ -134,26 +174,305 @@ namespace Crypto
         return std::string(hashed_buffer);
     }
 
-    bool VerifyPassword(const std::string& db_hash, const std::string incoming_password)
+    bool VerifyPassword(const std::string& db_hash, const std::string& incoming_password)
     {
-        return crypto_pwhash_str_verify
-        (
-        dp_hash.c_str(),
-        incoming_password.c_str(),
-        incoming_password.length(),
+        return crypto_pwhash_str_verify(
+            db_hash.c_str(),
+            incoming_password.c_str(),
+            incoming_password.length()
         ) == 0;
     }
 }
 
-==> ./main.cpp <==
-// i fucking hate myself
+==> main.cpp <==
 #include <iostream>
-#include <string>
-
-consteval std::string site_name = "/bam"
-
+#include <drogon/drogon.h>
+#include "authorization.hpp"
+#include "crypto.hpp"
 
 int main()
 {
+    drogon::app().setLogLevel(trantor::Logger::kDebug);
+    
+    std::cout << "Starting Server Engine...\n";
+    
+    // 1. Boot crypto
+    Crypto::Init();
+
+    // 2. Register DB connection (keep createDbClient - the warning is harmless)
+    drogon::app().createDbClient("postgresql", "127.0.0.1", 5432, "task_db", "task_user", "525836", 8);
+
+    // 3. Register route handlers
+    Auth::Init();
+
+    // 4. Hook seeding into the framework start sequence
+    // This runs after Drogon initializes the DB connection pool
+    drogon::app().registerBeginningAdvice([]() {
+        auto db = drogon::app().getDbClient();
+        if (!db) {
+            std::cerr << "FATAL: Database client failed to initialize!\n";
+            return;
+        }
+
+        std::string test_password = "password123";
+        std::string hashed_pw = Crypto::HashPassword(test_password);
+
+        db->execSqlAsync(
+            "INSERT INTO users (company_id, tier, name, username, password_hash) "
+            "VALUES (1, 2, 'Admin', 'admin', $1) ON CONFLICT (username) DO NOTHING",
+            [test_password](const drogon::orm::Result &r) {
+                std::cout << "\n============================================\n";
+                std::cout << "Database verified! Ready for login testing.\n";
+                std::cout << "Username: admin\n";
+                std::cout << "Password: " << test_password << "\n";
+                std::cout << "============================================\n\n";
+            },
+            [](const drogon::orm::DrogonDbException &e) {
+                std::cerr << "Database Seeding Warning: " << e.base().what() << "\n";
+            },
+            hashed_pw
+        );
+    });
+
+    // 5. Start listener
+    drogon::app().addListener("0.0.0.0", 8080);
+    std::cout << "Listening on http://0.0.0.0:8080" << site_name << "/login\n";
+    
+    // 6. Start the Drogon event loop
+    drogon::app().run();
+
     return 0;
+}
+
+==> task.cpp <==
+#include "task.hpp"
+#include "authorization.hpp"
+#include <string>
+
+void TaskAPI::Init()
+{
+    std::string base_route = std::string(site_name) + "/tasks";
+
+
+    drogon::app().registerHandler(base_route, &TaskAPI::GetTasks, {drogon::Get, "JwtFilter"});
+    drogon::app().registerHandler(base_route, &TaskAPI::CreateTask, {drogon::Post, "JwtFilter"});
+    drogon::app().registerHandler(base_route + "/{1}", &TaskAPI::GetTaskById, {drogon::Get, "JwtFilter"});
+    drogon::app().registerHandler(base_route + "/{1}", &TaskAPI::DeleteTask, {drogon::Delete, "JwtFilter"});
+    drogon::app().registerHandler(base_route + "/{1}/status", &TaskAPI::UpdateTaskStatus, {drogon::Patch, "JwtFilter"});
+}
+
+
+void TaskAPI::GetTasks(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback)
+{
+    Auth::User caller = Auth::GetUser(req);
+    auto db = drogon::app().getDbClient();
+
+    std::string filter_assigned_to = req->getParameter("assigned_to");
+
+    auto db_callback = [callback](const drogon::orm::Result &result) {
+        Json::Value tasks(Json::arrayValue);
+        for (const auto &row : result) {
+            Json::Value task;
+            task["id"] = row["id"].as<int64_t>();
+            task["assigned_by"] = row["assigned_by"].as<int64_t>();
+            task["assigned_to"] = row["assigned_to"].as<int64_t>();
+            task["title"] = row["title"].as<std::string>();
+            task["description"] = row["description"].isNull() ? "" : row["description"].as<std::string>();
+            task["status"] = row["status"].as<std::string>();
+            tasks.append(task);
+        }
+        Json::Value ret;
+        ret["status"] = "success";
+        ret["tasks"] = tasks;
+        callback(drogon::HttpResponse::newHttpJsonResponse(ret));
+    };
+
+    auto db_err = [callback](const drogon::orm::DrogonDbException &e) {
+        auto res = drogon::HttpResponse::newHttpResponse();
+        res->setStatusCode(drogon::k500InternalServerError);
+        callback(res);
+    };
+
+    if (!filter_assigned_to.empty()) {
+        try {
+            int64_t target_user = std::stoll(filter_assigned_to);
+            db->execSqlAsync("SELECT * FROM tasks WHERE company_id = $1 AND assigned_to = $2 ORDER BY id DESC", 
+            db_callback, db_err, caller.company_id, target_user);
+        } catch (...) {
+            auto res = drogon::HttpResponse::newHttpResponse();
+            res->setStatusCode(drogon::k400BadRequest);
+            res->setBody("{\"error\":\"Invalid assigned_to parameter\"}");
+            callback(res);
+        }
+    } else {
+        db->execSqlAsync("SELECT * FROM tasks WHERE company_id = $1 ORDER BY id DESC", 
+        db_callback, db_err, caller.company_id);
+    }
+}
+
+
+void TaskAPI::GetTaskById(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, std::string task_id)
+{
+    Auth::User caller = Auth::GetUser(req);
+    auto db = drogon::app().getDbClient();
+
+    try {
+        int64_t t_id = std::stoll(task_id);
+        db->execSqlAsync(
+        "SELECT * FROM tasks WHERE id = $1 AND company_id = $2",
+        [callback](const drogon::orm::Result &result) {
+            if (result.empty()) {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k404NotFound);
+                callback(res);
+                return;
+            }
+            Json::Value task;
+            task["id"] = result[0]["id"].as<int64_t>();
+            task["title"] = result[0]["title"].as<std::string>();
+            task["status"] = result[0]["status"].as<std::string>();
+            
+            Json::Value ret;
+            ret["status"] = "success";
+            ret["task"] = task;
+            callback(drogon::HttpResponse::newHttpJsonResponse(ret));
+        },
+        [](const drogon::orm::DrogonDbException &e) {},
+        t_id, caller.company_id
+        );
+    } catch (...) {
+        auto res = drogon::HttpResponse::newHttpResponse();
+        res->setStatusCode(drogon::k400BadRequest);
+        callback(res);
+    }
+}
+
+
+void TaskAPI::CreateTask(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback)
+{
+    auto json = req->getJsonObject();
+    if(!json || !json->isMember("title") || !json->isMember("assigned_to")) {
+        auto res = drogon::HttpResponse::newHttpResponse();
+        res->setStatusCode(drogon::k400BadRequest);
+        res->setBody("{\"error\":\"title and assigned_to are required\"}");
+        callback(res);
+        return;
+    }
+
+    Auth::User caller = Auth::GetUser(req);
+    int64_t assigned_to = (*json)["assigned_to"].asInt64();
+    std::string title = (*json)["title"].asString();
+    std::string description = json->get("description", "").asString();
+
+    auto db = drogon::app().getDbClient();
+
+    db->execSqlAsync(
+    "SELECT tier FROM users WHERE id = $1 AND company_id = $2",
+    [callback, caller, title, description, assigned_to, db](const drogon::orm::Result &result) {
+        if (result.empty()) {
+            auto res = drogon::HttpResponse::newHttpResponse();
+            res->setStatusCode(drogon::k404NotFound);
+            res->setBody("{\"error\":\"Target user not found in your company\"}");
+            callback(res);
+            return;
+        }
+
+        if (caller.tier > result[0]["tier"].as<int>()) {
+            auto res = drogon::HttpResponse::newHttpResponse();
+            res->setStatusCode(drogon::k403Forbidden);
+            res->setBody("{\"error\":\"Cannot assign tasks to higher tier users\"}");
+            callback(res);
+            return;
+        }
+
+        db->execSqlAsync(
+        "INSERT INTO tasks (company_id, assigned_by, assigned_to, title, description) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        [callback](const drogon::orm::Result &insert_res) {
+            Json::Value ret;
+            ret["status"] = "success";
+            ret["task_id"] = insert_res[0]["id"].as<int64_t>();
+            callback(drogon::HttpResponse::newHttpJsonResponse(ret));
+        },
+        [](const drogon::orm::DrogonDbException &e) {},
+        caller.company_id, caller.user_id, assigned_to, title, description
+        );
+    },
+    [](const drogon::orm::DrogonDbException &e) {},
+    assigned_to, caller.company_id
+    );
+}
+
+
+void TaskAPI::UpdateTaskStatus(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, std::string task_id)
+{
+    auto json = req->getJsonObject();
+    if(!json || !json->isMember("status")) {
+        auto res = drogon::HttpResponse::newHttpResponse();
+        res->setStatusCode(drogon::k400BadRequest);
+        callback(res);
+        return;
+    }
+
+    Auth::User caller = Auth::GetUser(req);
+    std::string new_status = (*json)["status"].asString();
+    auto db = drogon::app().getDbClient();
+
+    try {
+        int64_t t_id = std::stoll(task_id);
+
+
+        db->execSqlAsync(
+        "UPDATE tasks SET status = $1 WHERE id = $2 AND company_id = $3 AND assigned_to = $4 RETURNING id",
+        [callback](const drogon::orm::Result &result) {
+            if (result.empty()) {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k403Forbidden);
+                res->setBody("{\"error\":\"Task not found or you are not the assignee\"}");
+                callback(res);
+                return;
+            }
+            Json::Value ret;
+            ret["status"] = "success";
+            callback(drogon::HttpResponse::newHttpJsonResponse(ret));
+        },
+        [](const drogon::orm::DrogonDbException &e) {},
+        new_status, t_id, caller.company_id, caller.user_id
+        );
+    } catch (...) {
+        auto res = drogon::HttpResponse::newHttpResponse();
+        res->setStatusCode(drogon::k400BadRequest);
+        callback(res);
+    }
+}
+
+void TaskAPI::DeleteTask(const drogon::HttpRequestPtr& req, std::function<void(const drogon::HttpResponsePtr&)>&& callback, std::string task_id)
+{
+    Auth::User caller = Auth::GetUser(req);
+    auto db = drogon::app().getDbClient();
+
+    try {
+        int64_t t_id = std::stoll(task_id);
+
+        db->execSqlAsync(
+        "DELETE FROM tasks WHERE id = $1 AND company_id = $2 AND assigned_by = $3 RETURNING id",
+        [callback](const drogon::orm::Result &result) {
+            if (result.empty()) {
+                auto res = drogon::HttpResponse::newHttpResponse();
+                res->setStatusCode(drogon::k403Forbidden);
+                res->setBody("{\"error\":\"Task not found or you lack permission to delete it\"}");
+                callback(res);
+                return;
+            }
+            Json::Value ret;
+            ret["status"] = "success";
+            callback(drogon::HttpResponse::newHttpJsonResponse(ret));
+        },
+        [](const drogon::orm::DrogonDbException &e) {},
+        t_id, caller.company_id, caller.user_id
+        );
+    } catch (...) {
+        auto res = drogon::HttpResponse::newHttpResponse();
+        res->setStatusCode(drogon::k400BadRequest);
+        callback(res);
+    }
 }
